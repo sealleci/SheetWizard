@@ -2,5 +2,10 @@
 name = "SheetWizard"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
+notify = "7.0.0"
+serde = { version = "1.0.217", features = ["derive"] }
+toml = "0.8.19"
+win-toast-notify = "0.1.6"
