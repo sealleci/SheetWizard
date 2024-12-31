@@ -1,15 +1,14 @@
+#[cfg(not(debug_assertions))]
 #[macro_use]
 extern crate windows_service;
 
 use std::collections::HashMap;
-use std::env::var;
 use std::error::Error;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs::{read_dir, read_to_string};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
-use std::time::Duration;
 
 use notify::{
     recommended_watcher, Event, EventKind, RecursiveMode, Result as NotifyResult, Watcher,
@@ -17,10 +16,25 @@ use notify::{
 use serde::Deserialize;
 use toml::from_str;
 use win_toast_notify::{Duration as ToastDuration, WinToastNotify};
+
+#[cfg(not(debug_assertions))]
+use std::env::var;
+
+#[cfg(not(debug_assertions))]
+use std::ffi::OsString;
+
+#[cfg(not(debug_assertions))]
+use std::time::Duration;
+
+#[cfg(not(debug_assertions))]
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
 };
+
+#[cfg(not(debug_assertions))]
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+
+#[cfg(not(debug_assertions))]
 use windows_service::service_dispatcher;
 
 #[cfg(debug_assertions)]
@@ -197,35 +211,12 @@ fn get_filename_from_event(event: &Event) -> Option<String> {
     })
 }
 
-fn run_service() -> Result<(), Box<dyn Error>> {
-    let (tx, rx) = mpsc::channel::<NotifyResult<Event>>();
-    let tx_clone = tx.clone();
-    let status_handle = service_control_handler::register(
-        "SheetWizard",
-        move |control_event| -> ServiceControlHandlerResult {
-            match control_event {
-                ServiceControl::Stop => {
-                    tx_clone.send(Ok(Event::new(EventKind::Other))).unwrap();
-                    ServiceControlHandlerResult::NoError
-                }
-                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-                _ => ServiceControlHandlerResult::NotImplemented,
-            }
-        },
-    )?;
-
-    status_handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    })?;
-
-    let path_config_directory = var("SW_TOML_PATH").unwrap_or("./".to_string());
-    let path_config = load_config(&format!("{}\\path.toml", path_config_directory))?;
+fn run_watcher(
+    config_path: &str,
+    tx: mpsc::Sender<NotifyResult<Event>>,
+    rx: &mpsc::Receiver<NotifyResult<Event>>,
+) -> Result<(), Box<dyn Error>> {
+    let path_config = load_config(config_path)?;
     let mut watcher = recommended_watcher(tx)?;
     let tiangan_order = generate_tiangan_map();
     let mut is_expected_hidden_file_opened = false;
@@ -290,6 +281,48 @@ fn run_service() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn run_debug_service() -> Result<(), Box<dyn Error>> {
+    let (tx, rx) = mpsc::channel::<NotifyResult<Event>>();
+
+    run_watcher("./path.toml", tx, &rx)
+}
+
+#[cfg(not(debug_assertions))]
+fn run_service() -> Result<(), Box<dyn Error>> {
+    let (tx, rx) = mpsc::channel::<NotifyResult<Event>>();
+    let tx_clone = tx.clone();
+    let status_handle = service_control_handler::register(
+        "SheetWizard",
+        move |control_event| -> ServiceControlHandlerResult {
+            match control_event {
+                ServiceControl::Stop => {
+                    tx_clone.send(Ok(Event::new(EventKind::Other))).unwrap();
+                    ServiceControlHandlerResult::NoError
+                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                _ => ServiceControlHandlerResult::NotImplemented,
+            }
+        },
+    )?;
+
+    status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Running,
+        controls_accepted: ServiceControlAccept::STOP,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    })?;
+
+    let path_config_directory = var("SW_TOML_PATH").unwrap_or("./".to_string());
+
+    run_watcher(&format!("{}\\path.toml", path_config_directory), tx, &rx)?;
+
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Stopped,
@@ -303,14 +336,23 @@ fn run_service() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(not(debug_assertions))]
 fn run_service_entry(_: Vec<OsString>) {
     if let Err(_) = run_service() {}
 }
-
+#[cfg(not(debug_assertions))]
 define_windows_service!(ffi_service_main, run_service_entry);
 
+#[cfg(not(debug_assertions))]
 fn main() -> Result<(), Box<dyn Error>> {
     service_dispatcher::start("SheetWizard", ffi_service_main)?;
+
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn main() -> Result<(), Box<dyn Error>> {
+    run_debug_service()?;
 
     Ok(())
 }
