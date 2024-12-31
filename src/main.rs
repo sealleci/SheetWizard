@@ -50,6 +50,7 @@ struct Settings {
     listened_directory: String,
     filename_prefix: String,
     hidden_filename_prefix: String,
+    ext_name: String,
     script_directory: String,
     script_filename: String,
     env_name: String,
@@ -89,11 +90,13 @@ fn get_tiangan_from_filename(
     }
 }
 
-fn get_hidden_filename_with_largest_tiangan(
+fn get_filename_with_largest_tiangan(
     folder_path: &str,
     filename_prefix: &str,
     hidden_filename_prefix: &str,
+    ext_name: &str,
     tiangan_order: &HashMap<String, usize>,
+    is_hidden_file: bool,
 ) -> Option<PathBuf> {
     read_dir(folder_path)
         .ok()?
@@ -102,7 +105,7 @@ fn get_hidden_filename_with_largest_tiangan(
             entry
                 .path()
                 .extension()
-                .map(|ext| ext == "xlsx")
+                .map(|cur_ext| cur_ext == ext_name)
                 .unwrap_or(false)
         })
         .filter_map(|entry| {
@@ -118,6 +121,10 @@ fn get_hidden_filename_with_largest_tiangan(
         })
         .max_by_key(|(version, _)| *version)
         .map(|(_, path)| {
+            if !is_hidden_file {
+                return path;
+            }
+
             let new_filename = path
                 .file_name()
                 .unwrap_or(OsStr::new(""))
@@ -137,13 +144,17 @@ fn is_expected_file(
     folder_path: &str,
     filename_prefix: &str,
     hidden_filename_prefix: &str,
+    ext_name: &str,
     tiangan_order: &HashMap<String, usize>,
+    is_hidden_file: bool,
 ) -> bool {
-    if let Some(expected_hidden_filename) = get_hidden_filename_with_largest_tiangan(
+    if let Some(expected_hidden_filename) = get_filename_with_largest_tiangan(
         folder_path,
         filename_prefix,
         hidden_filename_prefix,
+        ext_name,
         tiangan_order,
+        is_hidden_file,
     ) {
         event
             .paths
@@ -220,6 +231,7 @@ fn run_watcher(
     let mut watcher = recommended_watcher(tx)?;
     let tiangan_order = generate_tiangan_map();
     let mut is_expected_hidden_file_opened = false;
+    let mut is_expected_file_modified = false;
     let mut cur_expected_hidden_filename = "".to_string();
 
     watcher
@@ -238,27 +250,46 @@ fn run_watcher(
                         &path_config.settings.listened_directory,
                         &path_config.settings.filename_prefix,
                         &path_config.settings.hidden_filename_prefix,
+                        &path_config.settings.ext_name,
                         &tiangan_order,
+                        true,
                     ) {
                         cur_expected_hidden_filename =
                             get_filename_from_event(&event).unwrap_or("".to_string());
                         is_expected_hidden_file_opened = true;
+                        is_expected_file_modified = false;
                         print_debug(&format!("{} opened", cur_expected_hidden_filename));
+                    }
+                }
+                EventKind::Modify(_) => {
+                    if is_expected_file(
+                        &event,
+                        &path_config.settings.listened_directory,
+                        &path_config.settings.filename_prefix,
+                        &path_config.settings.hidden_filename_prefix,
+                        &path_config.settings.ext_name,
+                        &tiangan_order,
+                        false,
+                    ) {
+                        is_expected_file_modified = true;
                     }
                 }
                 EventKind::Remove(_) => {
                     if is_expected_hidden_file_opened
+                        && is_expected_file_modified
                         && is_same_file(&event, &cur_expected_hidden_filename)
                     {
-                        print_debug(&format!("{} closed", cur_expected_hidden_filename));
                         cur_expected_hidden_filename = "".to_string();
                         is_expected_hidden_file_opened = false;
+                        is_expected_file_modified = false;
 
                         let success = run_script(
                             &path_config.settings.script_directory,
                             &path_config.settings.script_filename,
                             &path_config.settings.env_name,
                         );
+
+                        print_debug(&format!("{} closed", cur_expected_hidden_filename));
 
                         if success {
                             show_notification("Sheet Wizard", "Processed successfully.");
@@ -270,7 +301,7 @@ fn run_watcher(
                         }
                     }
                 }
-                EventKind::Access(_) | EventKind::Modify(_) => {}
+                EventKind::Access(_) => {}
                 _ => {
                     break;
                 }
@@ -300,7 +331,8 @@ fn run_service() -> Result<(), Box<dyn Error>> {
         move |control_event| -> ServiceControlHandlerResult {
             match control_event {
                 ServiceControl::Stop => {
-                    tx_clone.send(Ok(Event::new(EventKind::Other))).unwrap();
+                    if let Err(_) = tx_clone.send(Ok(Event::new(EventKind::Other))) {}
+
                     ServiceControlHandlerResult::NoError
                 }
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
