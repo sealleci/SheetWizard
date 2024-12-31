@@ -1,17 +1,27 @@
+#[macro_use]
+extern crate windows_service;
+
 use std::collections::HashMap;
+use std::env::var;
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{read_dir, read_to_string};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use notify::{
     recommended_watcher, Event, EventKind, RecursiveMode, Result as NotifyResult, Watcher,
 };
 use serde::Deserialize;
 use toml::from_str;
-use win_toast_notify::{Duration, WinToastNotify};
+use win_toast_notify::{Duration as ToastDuration, WinToastNotify};
+use windows_service::service::{
+    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
+};
+use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+use windows_service::service_dispatcher;
 
 #[cfg(debug_assertions)]
 fn print_debug(message: &str) {
@@ -36,8 +46,8 @@ struct PathConfig {
     settings: Settings,
 }
 
-fn load_config(config_path: &str) -> Result<PathConfig, Box<dyn Error>> {
-    let content = read_to_string(config_path)?;
+fn load_config(file_path: &str) -> Result<PathConfig, Box<dyn Error>> {
+    let content = read_to_string(file_path)?;
     let config = from_str::<PathConfig>(&content)?;
 
     Ok(config)
@@ -136,14 +146,10 @@ fn is_same_file(event: &Event, expected_filename: &str) -> bool {
 
 fn run_script(directory: &str, filename: &str, env_name: &str) -> bool {
     if !Path::new(directory).exists() {
-        print_debug("Directory of script does not exist");
-
         return false;
     }
 
     if !Path::new(directory).join(filename).exists() {
-        print_debug("Script file does not exist");
-
         return false;
     }
 
@@ -171,11 +177,7 @@ fn run_script(directory: &str, filename: &str, env_name: &str) -> bool {
                 false
             }
         }
-        Err(e) => {
-            print_debug(&format!("Failed to execute script: {}", e));
-
-            false
-        }
+        Err(_) => false,
     }
 }
 
@@ -183,7 +185,7 @@ fn show_notification(title: &str, message: &str) {
     WinToastNotify::new()
         .set_title(title)
         .set_messages(vec![message])
-        .set_duration(Duration::Short)
+        .set_duration(ToastDuration::Short)
         .show()
         .expect("Failed to show toast notification")
 }
@@ -195,18 +197,46 @@ fn get_filename_from_event(event: &Event) -> Option<String> {
     })
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let path_config = load_config("path.toml")?;
-    let tiangan_order = generate_tiangan_map();
+fn run_service() -> Result<(), Box<dyn Error>> {
     let (tx, rx) = mpsc::channel::<NotifyResult<Event>>();
+    let tx_clone = tx.clone();
+    let status_handle = service_control_handler::register(
+        "SheetWizard",
+        move |control_event| -> ServiceControlHandlerResult {
+            match control_event {
+                ServiceControl::Stop => {
+                    tx_clone.send(Ok(Event::new(EventKind::Other))).unwrap();
+                    ServiceControlHandlerResult::NoError
+                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                _ => ServiceControlHandlerResult::NotImplemented,
+            }
+        },
+    )?;
+
+    status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Running,
+        controls_accepted: ServiceControlAccept::STOP,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    })?;
+
+    let path_config_directory = var("SW_TOML_PATH").unwrap_or("./".to_string());
+    let path_config = load_config(&format!("{}\\path.toml", path_config_directory))?;
     let mut watcher = recommended_watcher(tx)?;
+    let tiangan_order = generate_tiangan_map();
     let mut is_expected_hidden_file_opened = false;
     let mut cur_expected_hidden_filename = "".to_string();
 
-    watcher.watch(
-        Path::new(&path_config.settings.listened_directory),
-        RecursiveMode::Recursive,
-    )?;
+    watcher
+        .watch(
+            Path::new(&path_config.settings.listened_directory),
+            RecursiveMode::Recursive,
+        )
+        .unwrap_or(());
 
     for res in rx {
         match res {
@@ -242,17 +272,45 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if success {
                             show_notification("Sheet Wizard", "Processed successfully.");
                         } else {
-                            show_notification("Sheet Wizard", "Processed failed.");
+                            show_notification(
+                                "Sheet Wizard",
+                                "Processing failed, the file may not have changed.",
+                            );
                         }
                     }
                 }
-                _ => {}
+                EventKind::Access(_) | EventKind::Modify(_) => {}
+                _ => {
+                    break;
+                }
             },
             Err(e) => {
                 print_debug(&format!("Error occurred in watcher: {:?}", e));
             }
         }
     }
+
+    status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    })?;
+
+    Ok(())
+}
+
+fn run_service_entry(_: Vec<OsString>) {
+    if let Err(_) = run_service() {}
+}
+
+define_windows_service!(ffi_service_main, run_service_entry);
+
+fn main() -> Result<(), Box<dyn Error>> {
+    service_dispatcher::start("SheetWizard", ffi_service_main)?;
 
     Ok(())
 }
